@@ -1,23 +1,35 @@
 import { NextRequest, NextResponse } from "next/server";
-import db from "@/lib/db";
+import { auth } from "@clerk/nextjs/server";
+import { neon } from "@neondatabase/serverless";
+
+const getSql = () => neon(process.env.DATABASE_URL!);
 
 export async function GET() {
   try {
-    const conversations = db 
-      .prepare('SELECT * FROM "Conversation" ORDER BY "createdAt" DESC')
-      .all();
+    const { userId } = await auth();
+    if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-    const sessions = (conversations as any[]).map(conv => {
-      const latestMessage = db
-        .prepare('SELECT content FROM "Message" WHERE "conversationId" = ? ORDER BY "createdAt" DESC LIMIT 1')
-        .get(conv.id);
+    const sql = getSql();
 
-      return {
-        id: conv.id,
-        createdAt: conv.createdAt,
-        lastMessage: latestMessage ? (latestMessage as any).content : "No messages yet..."
-      };
-    });
+    const [[user]] = await sql`SELECT id FROM "User" WHERE "clerkId" = ${userId}`;
+
+    if (!user) {
+      return NextResponse.json([]);
+    }
+
+    const conversations = await sql`
+      SELECT c.id, c."createdAt",
+        (SELECT m.content FROM "Message" m WHERE m."conversationId" = c.id ORDER BY m."createdAt" DESC LIMIT 1) as "lastMessage"
+      FROM "Conversation" c
+      WHERE c."userId" = ${user.id}
+      ORDER BY c."createdAt" DESC
+    `;
+
+    const sessions = conversations.map((conv: any) => ({
+      id: conv.id,
+      createdAt: conv.createdAt,
+      lastMessage: conv.lastMessage || "No messages yet...",
+    }));
 
     return NextResponse.json(sessions);
   } catch (error) {
@@ -27,20 +39,21 @@ export async function GET() {
 }
 
 export async function DELETE(req: NextRequest) {
-  const { searchParams } = req.nextUrl;
-  const id = searchParams.get("id");
-
-  if (!id) {
-    return NextResponse.json({ error: "Missing conversation ID" }, { status: 400 });
-  }
-
   try {
-    // SQLite DELETE query to delete the conversation. Messages will be automatically
-    // deleted if ON DELETE CASCADE was set up in the schema. If not, we'll delete them manually first.
-    db.prepare('DELETE FROM "Conversation" WHERE id = ?').run(id);
+    const { userId } = await auth();
+    if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-    // Fallback cleanup in case cascade deletes aren't set up on the Message table
-    db.prepare('DELETE FROM "Message" WHERE "conversationId" = ?').run(id);
+    const { searchParams } = req.nextUrl;
+    const id = searchParams.get("id");
+
+    if (!id) {
+      return NextResponse.json({ error: "Missing conversation ID" }, { status: 400 });
+    }
+
+    const sql = getSql();
+
+    await sql`DELETE FROM "Message" WHERE "conversationId" = ${id}`;
+    await sql`DELETE FROM "Conversation" WHERE id = ${id}`;
 
     return NextResponse.json({ message: "Conversation deleted successfully" });
   } catch (error) {

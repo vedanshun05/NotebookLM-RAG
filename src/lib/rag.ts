@@ -1,10 +1,11 @@
-import { OpenAIEmbeddings } from "@langchain/openai";
-import { QdrantVectorStore } from "@langchain/qdrant";
+import { neon } from "@neondatabase/serverless";
 import { RecursiveCharacterTextSplitter } from "@langchain/textsplitters";
-import { PDFLoader } from "@langchain/community/document_loaders/fs/pdf";
+import { QdrantVectorStore } from "@langchain/qdrant";
+import { OpenAIEmbeddings } from "@langchain/openai";
 import { Document } from "@langchain/core/documents";
-import db from "./db";
-import fs from "fs";
+import pdfParse from "pdf-parse";
+
+const getSql = () => neon(process.env.DATABASE_URL!);
 
 export const getEmbeddings = () => {
   return new OpenAIEmbeddings({
@@ -16,17 +17,23 @@ export const getEmbeddings = () => {
   });
 };
 
-export async function processAndIndexDocument(userId: string, filePath: string, filename: string, fileType: string) {
-  let docs;
-  
+export async function processAndIndexDocument(
+  userId: string,
+  buffer: Buffer,
+  filename: string,
+  fileType: string
+) {
   try {
-    if (fileType === 'pdf') {
-      const loader = new PDFLoader(filePath);
-      docs = await loader.load();
+    let text: string;
+
+    if (fileType === "pdf") {
+      const parsed = await pdfParse(buffer);
+      text = parsed.text;
     } else {
-      const text = fs.readFileSync(filePath, 'utf8');
-      docs = [new Document({ pageContent: text, metadata: { source: filename } })];
+      text = buffer.toString("utf8");
     }
+
+    const docs = [new Document({ pageContent: text, metadata: { source: filename } })];
 
     const splitter = new RecursiveCharacterTextSplitter({
       chunkSize: 1000,
@@ -34,19 +41,18 @@ export async function processAndIndexDocument(userId: string, filePath: string, 
     });
 
     const splitDocs = await splitter.splitDocuments(docs);
-
     const embeddings = getEmbeddings();
     const collectionName = `docs_${userId}_${Date.now()}`;
-    
+
     await QdrantVectorStore.fromDocuments(splitDocs, embeddings, {
       url: process.env.QDRANT_URL!,
       apiKey: process.env.QDRANT_API_KEY,
-      collectionName: collectionName,
+      collectionName,
     });
 
-    // Use SQLite via better-sqlite3
-    const stmt = db.prepare('INSERT INTO "Document" ("userId", "filename", "fileType", "qdrantCollection") VALUES (?, ?, ?, ?)');
-    stmt.run(userId, filename, fileType, collectionName);
+    const sql = getSql();
+    await sql`INSERT INTO "Document" ("userId", "filename", "fileType", "qdrantCollection")
+             VALUES (${userId}, ${filename}, ${fileType}, ${collectionName})`;
 
     return { collectionName };
   } catch (error) {
@@ -60,12 +66,9 @@ export async function retrieveContext(collectionName: string, query: string) {
   const vectorStore = await QdrantVectorStore.fromExistingCollection(embeddings, {
     url: process.env.QDRANT_URL!,
     apiKey: process.env.QDRANT_API_KEY,
-    collectionName: collectionName,
+    collectionName,
   });
 
-  const retriever = vectorStore.asRetriever({
-    k: 5,
-  });
-
+  const retriever = vectorStore.asRetriever({ k: 5 });
   return await retriever.invoke(query);
 }

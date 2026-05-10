@@ -1,7 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@clerk/nextjs/server";
-import db from "@/lib/db";
+import { neon } from "@neondatabase/serverless";
 import { generateGroundedAnswer } from "@/lib/llm";
+
+const getSql = () => neon(process.env.DATABASE_URL!);
 
 export async function POST(req: NextRequest) {
   try {
@@ -11,26 +13,38 @@ export async function POST(req: NextRequest) {
     const { message, conversationId } = await req.json();
     if (!message) return NextResponse.json({ error: "Message is required" }, { status: 400 });
 
+    const sql = getSql();
     let currentConvId = conversationId;
 
     if (!currentConvId) {
-      // Check if user exists, create if not
-      const userRes = db.prepare('SELECT id FROM "User" WHERE "clerkId" = ?').get(userId);
+      const [existingUser] = await sql`
+        SELECT id FROM "User" WHERE "clerkId" = ${userId}
+      `;
 
-      let userDbId: number;
-      if (!userRes) {
-        const newUserRes = db.prepare('INSERT INTO "User" ("clerkId", email) VALUES (?, ?) RETURNING id').get(userId, 'unknown@example.com') as any;
-        userDbId = newUserRes.id;
+      let userDbId: string;
+      if (!existingUser) {
+        const [newUser] = await sql`
+          INSERT INTO "User" ("clerkId", email)
+          VALUES (${userId}, ${`${userId}@placeholder.local`})
+          RETURNING id
+        `;
+        userDbId = newUser.id;
       } else {
-        userDbId = (userRes as any).id;
+        userDbId = existingUser.id;
       }
 
-      const convRes = db.prepare('INSERT INTO "Conversation" ("userId") VALUES (?) RETURNING id').get(userDbId) as any;
-      currentConvId = convRes.id;
+      const [conv] = await sql`
+        INSERT INTO "Conversation" ("userId")
+        VALUES (${userDbId})
+        RETURNING id
+      `;
+      currentConvId = conv.id;
     }
 
-    // Save user message
-    db.prepare('INSERT INTO "Message" ("conversationId", "role", "content") VALUES (?, ?, ?)').run(currentConvId, "user", message);
+    await sql`
+      INSERT INTO "Message" ("conversationId", "role", "content")
+      VALUES (${currentConvId}, 'user', ${message})
+    `;
 
     const answer = await generateGroundedAnswer(userId, currentConvId, message);
 

@@ -1,21 +1,32 @@
 import { NextResponse } from "next/server";
-import db from "@/lib/db";
+import { auth } from "@clerk/nextjs/server";
+import { neon } from "@neondatabase/serverless";
+
+const getSql = () => neon(process.env.DATABASE_URL!);
 
 export async function GET() {
   try {
-    // Get the most recent document from the database
-    const doc = db
-      .prepare('SELECT filename, "fileType", "qdrantCollection" FROM "Document" ORDER BY "createdAt" DESC LIMIT 1')
-      .get();
+    const { userId } = await auth();
+    if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
+    const sql = getSql();
+
+    const [[doc]] = await sql`
+      SELECT filename, "fileType", "qdrantCollection"
+      FROM "Document"
+      WHERE "userId" = ${userId}
+      ORDER BY "createdAt" DESC
+      LIMIT 1
+    `;
 
     if (!doc) {
       return NextResponse.json({ filename: null, message: "No documents found" });
     }
 
     return NextResponse.json({
-      filename: (doc as any).filename,
-      fileType: (doc as any).fileType,
-      collectionName: (doc as any).qdrantCollection,
+      filename: doc.filename,
+      fileType: doc.fileType,
+      collectionName: doc.qdrantCollection,
     });
   } catch (error) {
     console.error("Error fetching latest document:", error);
