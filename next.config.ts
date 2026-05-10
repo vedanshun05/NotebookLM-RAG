@@ -1,7 +1,9 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  /* config options here */
+  installOptions: {
+    legacyPeerDeps: true,
+  },
 };
 
 export default nextConfig;
